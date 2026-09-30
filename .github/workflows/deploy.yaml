@@ -5,50 +5,117 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # ==========================================
+      # 1. Checkout repository
+      # ==========================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # ==========================================
+      # 2. Setup Node.js 24
+      # ==========================================
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
+      # ==========================================
+      # 3. Install dependencies
+      # ==========================================
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
+      # ==========================================
+      # 4. Build React + TypeScript
+      # ==========================================
+      - name: Build React application
         run: npm run build
 
+      # ==========================================
+      # 5. Connect GitHub Actions to Tailscale
+      # ==========================================
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.VPS_HOST }}
+
+      # ==========================================
+      # 6. Test Tailscale connection
+      # ==========================================
+      - name: Test Tailscale connection
+        run: |
+          echo "Testing connection to VPS..."
+          ping -c 3 ${{ secrets.VPS_HOST }}
+
+      # ==========================================
+      # 7. Test SSH connection
+      # ==========================================
+      - name: Test SSH connection
+        run: |
+          ssh \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "echo SSH connection successful"
+
+      # ==========================================
+      # 8. Copy project to VPS
+      # ==========================================
       - name: Copy project to VPS
         uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
           source: "."
           target: "/opt/my-react-app"
 
-      - name: Deploy on VPS
+      # ==========================================
+      # 9. Build & deploy Docker container
+      # ==========================================
+      - name: Deploy Docker container
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
           script: |
             set -e
 
+            echo "=================================="
+            echo "Starting deployment"
+            echo "=================================="
+
             cd /opt/my-react-app
 
-            docker build -t my-react-app:latest .
+            echo "Building Docker image..."
+
+            docker build \
+              --pull \
+              -t my-react-app:latest \
+              .
+
+            echo "Stopping existing container..."
 
             docker stop my-react-app || true
+
+            echo "Removing existing container..."
+
             docker rm my-react-app || true
+
+            echo "Starting new container..."
 
             docker run -d \
               --name my-react-app \
@@ -56,4 +123,18 @@ jobs:
               -p 80:80 \
               my-react-app:latest
 
+            echo "Removing unused Docker images..."
+
             docker image prune -f
+
+            echo "=================================="
+            echo "Deployment successful!"
+            echo "=================================="
+
+            echo "Container status:"
+
+            docker ps --filter "name=my-react-app"
+
+            echo "Recent logs:"
+
+            docker logs --tail 50 my-react-app
