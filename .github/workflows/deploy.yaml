@@ -14,13 +14,13 @@ jobs:
 
     steps:
       # ==========================================
-      # 1. Checkout repository
+      # 1. Checkout
       # ==========================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ==========================================
-      # 2. Setup Node.js 24
+      # 2. Node.js 24
       # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,13 +35,13 @@ jobs:
         run: npm ci
 
       # ==========================================
-      # 4. Build React + TypeScript
+      # 4. Build React application
       # ==========================================
       - name: Build React application
         run: npm run build
 
       # ==========================================
-      # 5. Connect GitHub Actions to Tailscale
+      # 5. Connect to Tailscale
       # ==========================================
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -50,91 +50,109 @@ jobs:
           ping: ${{ secrets.VPS_HOST }}
 
       # ==========================================
-      # 6. Test Tailscale connection
-      # ==========================================
-      - name: Test Tailscale connection
-        run: |
-          echo "Testing connection to VPS..."
-          ping -c 3 ${{ secrets.VPS_HOST }}
-
-      # ==========================================
-      # 7. Test SSH connection
+      # 6. Test SSH
       # ==========================================
       - name: Test SSH connection
         run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
           ssh \
-            -o StrictHostKeyChecking=no \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=10 \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-            "echo SSH connection successful"
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "echo 'SSH connection successful'"
 
       # ==========================================
-      # 8. Copy project to VPS
+      # 7. Prepare deployment directory
       # ==========================================
-      - name: Copy project to VPS
-        uses: appleboy/scp-action@v1
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
-          source: "."
-          target: "/opt/my-react-app"
+      - name: Prepare VPS
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "mkdir -p /home/${{ secrets.VPS_USER }}/my-react-app"
 
       # ==========================================
-      # 9. Build & deploy Docker container
+      # 8. Transfer project through SSH
+      # ==========================================
+      - name: Upload project
+        run: |
+          tar \
+            --exclude='./.git' \
+            --exclude='./node_modules' \
+            --exclude='./dist' \
+            -czf - . | \
+          ssh \
+            -i ~/.ssh/deploy_key \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "tar -xzf - -C /home/${{ secrets.VPS_USER }}/my-react-app"
+
+      # ==========================================
+      # 9. Build and restart Docker
       # ==========================================
       - name: Deploy Docker container
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
-          script: |
-            set -e
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            << 'EOF'
 
-            echo "=================================="
-            echo "Starting deployment"
-            echo "=================================="
+          set -e
 
-            cd /opt/my-react-app
+          APP_DIR="$HOME/my-react-app"
 
-            echo "Building Docker image..."
+          echo "=================================="
+          echo "Starting Docker deployment"
+          echo "=================================="
 
-            docker build \
-              --pull \
-              -t my-react-app:latest \
-              .
+          cd "$APP_DIR"
 
-            echo "Stopping existing container..."
+          echo "Building Docker image..."
 
-            docker stop my-react-app || true
+          docker build \
+            --pull \
+            -t my-react-app:latest \
+            .
 
-            echo "Removing existing container..."
+          echo "Stopping old container..."
 
-            docker rm my-react-app || true
+          docker stop my-react-app || true
 
-            echo "Starting new container..."
+          echo "Removing old container..."
 
-            docker run -d \
-              --name my-react-app \
-              --restart unless-stopped \
-              -p 80:80 \
-              my-react-app:latest
+          docker rm my-react-app || true
 
-            echo "Removing unused Docker images..."
+          echo "Starting new container..."
 
-            docker image prune -f
+          docker run -d \
+            --name my-react-app \
+            --restart unless-stopped \
+            -p 80:80 \
+            my-react-app:latest
 
-            echo "=================================="
-            echo "Deployment successful!"
-            echo "=================================="
+          echo "Cleaning unused images..."
 
-            echo "Container status:"
+          docker image prune -f
 
-            docker ps --filter "name=my-react-app"
+          echo "=================================="
+          echo "Deployment successful"
+          echo "=================================="
 
-            echo "Recent logs:"
+          docker ps --filter "name=my-react-app"
 
-            docker logs --tail 50 my-react-app
+          EOF
+
+      # ==========================================
+      # 10. Cleanup SSH key
+      # ==========================================
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key
