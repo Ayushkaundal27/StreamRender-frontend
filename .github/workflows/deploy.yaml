@@ -51,6 +51,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:gtihubaction
 
       # ==========================================
       # 6. Test SSH
